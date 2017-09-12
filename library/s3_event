@@ -1,4 +1,4 @@
-#!/usr/bin/python
+ #!/usr/bin/python
 # (c) 2017, Andrii Radyk (@AnderEnder) <ander.ender@gmail.com>
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
@@ -28,7 +28,7 @@ options:
     aliases: [ bucket ]
     required: true
   source_prefix:
-    description: 
+    description:
       - An optional prefix to limit the notifications to objects with keys that start with matching characters."
     aliases: [ prefix ]
   source_suffix:
@@ -37,9 +37,9 @@ options:
     aliases: [ suffix ]
   source_events:
     description:
-      - The events to have trigger notifications. 
+      - The events to have trigger notifications.
       - Multiple events can be selected to send to the same destination.
-      - Set up different events to send to different destinations and a prefix or suffix can set up for an event. 
+      - Set up different events to send to different destinations and a prefix or suffix can set up for an event.
       - However, for each bucket, individual events cannot have multiple configurations with overlapping prefixes or
       - suffixes that could match the same object key.
     aliases: [ events ]
@@ -92,8 +92,8 @@ EXAMPLES = '''
 '''
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ec2 import (ec2_argument_spec, HAS_BOTO3,
-                                      get_aws_connection_info, boto3_conn)
+from ansible.module_utils.ec2 import ec2_argument_spec, HAS_BOTO3
+from ansible.module_utils.ec2 import get_aws_connection_info, boto3_conn
 
 try:
     import botocore
