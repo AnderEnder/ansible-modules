@@ -3,6 +3,7 @@
 # (c) 2017, Andrii Radyk (@AnderEnder) <ander.ender@gmail.com>
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
+
 from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
@@ -97,7 +98,7 @@ options:
       - Specify a string here to override any encryption and ensure no encryption is used.
     required: false
     default: null
-  s3_encryption_awskmskeyarn:
+  s3_encryption_aws_kmskey_arn:
     description:
       - An AWS KMS Key ARN to use for encrypting data at S3. Must be in the same region as the S3 bucket.
     required: false
@@ -121,6 +122,7 @@ author:
     - "Andrii Radyk (@AnderEnder)"
 '''
 
+import time
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ec2 import ec2_argument_spec, HAS_BOTO3
 from ansible.module_utils.ec2 import get_aws_connection_info, boto3_conn
@@ -130,6 +132,9 @@ try:
 except:
     pass
     # handled by imported HAS_BOTO3
+
+WAIT_SLEEP_TIMEOUT = 5
+REDSHIFT_UNSUPPORTED_COMPRESSION = ['SNAPPY', 'ZIP']
 
 
 def validate_parameters(required_params, valid_params, module):
@@ -179,22 +184,14 @@ def await_delivery_stream_state(module, conn, state):
     delivery_stream_name = module.params.get('delivery_stream_name')
     status = _has_delivery_stream_state(module, conn, state)
     while wait_timeout > time.time() and not status:
-        time.sleep(5)
+        time.sleep(WAIT_SLEEP_TIMEOUT)
         if wait_timeout <= time.time():
             module.fail_json(msg="Timeout waiting for Delivery Stream %s" % delivery_stream_name)
         status = _has_delivery_stream_state(module, conn, state)
     return status
 
 
-def create_delivery_stream(module, conn):
-    config_type = module.params.get('configuration_type')
-    wait = module.params.get('wait')
-
-    if not config_type:
-        module.fail_json(msg="You must specify a configuration type when creating a delivery stream.")
-    if config_type not in ['s3', 'redshift']:
-        module.fail_json(msg="configuration_type must be either 's3' or 'redshift'.")
-
+def _delivery_stream_s3_params(module):
     required_params = [
         'delivery_stream_name',
         's3_role_arn',
@@ -206,31 +203,11 @@ def create_delivery_stream(module, conn):
         's3_buffering_hints_size_in_mb',
         's3_buffering_interval_in_seconds',
         's3_encryption_no_encryption_config',
-        's3_encryption_awskmskeyarn',
-        'wait',  # These are used internally, so must be considered valid
+        's3_encryption_aws_kmskey_arn',
+        'wait',
         'wait_timeout',
     ]
-    if config_type == 'redshift':
-        required_params.extend([
-            'redshift_role_arn',
-            'redshift_cluster_jdbcurl',
-            'redshift_copy_data_table_name',
-            'redshift_username',
-            'redshift_password',
-        ])
-        valid_params.extend([
-            'redshift_copy_data_table_columns',
-            'redshift_copy_options',
-        ])
     validate_parameters(required_params, valid_params, module)
-
-    delivery_stream = _describe_delivery_stream(module, conn)
-
-    if delivery_stream:
-        module.exit_json(changed=False)
-
-    if module.check_mode:
-        module.exit_json(changed=True)
 
     delivery_stream_name = module.params.get('delivery_stream_name')
     s3_role_arn = module.params.get('s3_role_arn')
@@ -240,7 +217,67 @@ def create_delivery_stream(module, conn):
     s3_buffering_hints_size_in_mb = module.params.get('s3_buffering_hints_size_in_mb')
     s3_buffering_interval_in_seconds = module.params.get('s3_buffering_interval_in_seconds')
     s3_encryption_no_encryption_config = module.params.get('s3_encryption_no_encryption_config')
-    s3_encryption_awskmskeyarn = module.params.get('s3_encryption_awskmskeyarn')
+    s3_encryption_aws_kmskey_arn = module.params.get('s3_encryption_aws_kmskey_arn')
+    cloudwatch_enabled = module.params.get('cloudwatch_enabled')
+
+    s3config = dict(
+        RoleARN=s3_role_arn,
+        BucketARN=s3_bucket_arn
+    )
+
+    # Optional S3 parameters
+    if s3_prefix:
+        s3config['Prefix'] = s3_prefix
+    if s3_compression_format:
+        s3config['CompressionFormat'] = s3_compression_format
+
+    if s3_buffering_hints_size_in_mb or s3_buffering_interval_in_seconds:
+        s3config['BufferingHints'] = dict()
+        if s3_buffering_hints_size_in_mb is not None:
+            s3config['BufferingHints']['SizeInMBs'] = int(s3_buffering_hints_size_in_mb)
+        if s3_buffering_interval_in_seconds:
+            s3config['BufferingHints']['IntervalInSeconds'] = int(s3_buffering_interval_in_seconds)
+
+    if s3_encryption_no_encryption_config or s3_encryption_aws_kmskey_arn:
+        s3config['EncryptionConfiguration'] = dict()
+        if s3_encryption_no_encryption_config:
+            s3config['EncryptionConfiguration']['NoEncryptionConfig'] = 'NoEncryption'
+        if s3_encryption_aws_kmskey_arn:
+            s3config['EncryptionConfiguration']['AWSKMSKeyARN'] = s3_encryption_aws_kmskey_arn
+
+    s3config['CloudWatchLoggingOptions'] = dict(
+        Enabled=cloudwatch_enabled,
+        LogGroupName="/aws/kinesisfirehose/%s" % delivery_stream_name,
+        LogStreamName='S3Delivery'
+    )
+    return s3config
+
+
+def _delivery_stream_redshift_params(module):
+    s3config = _delivery_stream_s3_params(module)
+
+    required_params = [
+        'redshift_role_arn',
+        'redshift_cluster_jdbcurl',
+        'redshift_copy_data_table_name',
+        'redshift_username',
+        'redshift_password',
+    ]
+    valid_params = [
+        'redshift_copy_data_table_columns',
+        'redshift_copy_options',
+    ]
+    validate_parameters(required_params, valid_params, module)
+
+    s3_compression_format = module.params.get('s3_compression_format')
+
+    # The compression formats SNAPPY or ZIP cannot be specified in Redshift S3Configuration because the Amazon Redshift
+    # COPY operation that reads from the S3 bucket doesn't support these compression formats.
+    if s3_compression_format in REDSHIFT_UNSUPPORTED_COMPRESSION:
+        compression_list = ", ".join(REDSHIFT_UNSUPPORTED_COMPRESSION)
+        err_msg = "Redshift S3Configuration does not support compression types: %s" % compression_list
+        module.fail_json(msg=err_msg)
+
     redshift_role_arn = module.params.get('redshift_role_arn')
     redshift_cluster_jdbcurl = module.params.get('redshift_cluster_jdbcurl')
     redshift_copy_data_table_name = module.params.get('redshift_copy_data_table_name')
@@ -248,75 +285,59 @@ def create_delivery_stream(module, conn):
     redshift_password = module.params.get('redshift_password')
     redshift_copy_data_table_columns = module.params.get('redshift_copy_data_table_columns')
     redshift_copy_options = module.params.get('redshift_copy_options')
-    firehose_log_enabled = module.params.get('firehose_log_enabled')
+
+    rscopy = dict(
+        DataTableName=redshift_copy_data_table_name
+    )
+    if redshift_copy_data_table_columns:
+        rscopy['DataTableColumns'] = redshift_copy_data_table_columns
+    if redshift_copy_options:
+        rscopy['CopyOptions'] = redshift_copy_options
+
+    # Required Redshift parameters, and S3 config
+    redshift_config = dict(
+        RoleARN=redshift_role_arn,
+        ClusterJDBCURL=redshift_cluster_jdbcurl,
+        CopyCommand=rscopy,
+        Username=redshift_username,
+        Password=redshift_password,
+        S3Configuration=s3config
+    )
+    return redshift_config
+
+
+def create_delivery_stream(module, conn):
+    config_type = module.params.get('configuration_type')
+    wait = module.params.get('wait')
+
+    delivery_stream = _describe_delivery_stream(module, conn)
+
+    if delivery_stream:
+        module.exit_json(changed=False)
+
+    if module.check_mode:
+        module.exit_json(changed=True)
 
     params = dict(
         DeliveryStreamName=module.params.get('delivery_stream_name'),
     )
 
     # S3 parameters are required for both S3 and Redshift, but are in different locations
-    s3config = None
     if config_type == 'redshift':
-        # Required Redshift parameters, and S3 config initialization
-        params['RedshiftDestinationConfiguration'] = dict(
-            RoleARN=redshift_role_arn,
-            ClusterJDBCURL=redshift_cluster_jdbcurl,
-            CopyCommand=dict(
-                DataTableName=redshift_copy_data_table_name,
-            ),
-            Username=redshift_username,
-            Password=redshift_password,
-            S3Configuration=dict()
-        )
-        s3config = params['RedshiftDestinationConfiguration']['S3Configuration']
-        rscopy = params['RedshiftDestinationConfiguration']['CopyCommand']
-
-        # Optional Redshift parameters
-        if redshift_copy_data_table_columns is not None:
-            rscopy['DataTableColumns'] = redshift_copy_data_table_columns
-        if redshift_copy_options is not None:
-            rscopy['CopyOptions'] = redshift_copy_options
+        redshift_config = _delivery_stream_redshift_params(module)
+        params['RedshiftDestinationConfiguration'] = redshift_config
 
     if config_type == 's3':
-        # Just initialize an S3 config section
-        params['ExtendedS3DestinationConfiguration'] = dict()
-        s3config = params['ExtendedS3DestinationConfiguration']
+        s3config = _delivery_stream_s3_params(module)
+        params['ExtendedS3DestinationConfiguration'] = s3config
 
-    # Required S3 parameters
-    s3config['RoleARN'] = s3_role_arn
-    s3config['BucketARN'] = s3_bucket_arn
+    try:
+        response = conn.create_delivery_stream(**params)
+    except botocore.exceptions.ClientError as e:
+        module.fail_json(msg=str(e))
 
-    # Optional S3 parameters
-    if s3_prefix is not None:
-        s3config['Prefix'] = s3_prefix
-    if s3_compression_format is not None:
-        s3config['CompressionFormat'] = s3_compression_format
-    if s3_buffering_hints_size_in_mb is not None or s3_buffering_interval_in_seconds is not None:
-        s3config['BufferingHints'] = dict()
-    if s3_buffering_hints_size_in_mb is not None:
-        s3config['BufferingHints']['SizeInMBs'] = int(s3_buffering_hints_size_in_mb)
-    if s3_buffering_interval_in_seconds is not None:
-        s3config['BufferingHints']['IntervalInSeconds'] = int(s3_buffering_interval_in_seconds)
-    if s3_encryption_no_encryption_config is not None or s3_encryption_awskmskeyarn is not None:
-        s3config['EncryptionConfiguration'] = dict()
-    if s3_encryption_no_encryption_config is not None:
-        # Explicitly disabling encryption sends the hard-coded value 'NoEncryptionConfig'
-        s3config['EncryptionConfiguration']['NoEncryptionConfig'] = 'NoEncryption'
-    if s3_encryption_awskmskeyarn is not None:
-        s3config['EncryptionConfiguration']['AWSKMSKeyARN'] = s3_encryption_awskmskeyarn
-
-    # Optional logging
-    s3config['CloudWatchLoggingOptions'] = dict()
-    s3config['CloudWatchLoggingOptions']['Enabled'] = firehose_log_enabled
-    s3config['CloudWatchLoggingOptions']['LogGroupName'] = "/aws/kinesisfirehose/%s" % delivery_stream_name
-    s3config['CloudWatchLoggingOptions']['LogStreamName'] = 'S3Delivery'
-    s3config['ProcessingConfiguration'] = dict()
-    s3config['ProcessingConfiguration']['Enabled'] = False
-
-    results = conn.create_delivery_stream(**params)
-    # TODO - catch exceptions, whatever those are
-    if not results or ('ResponseMetadata' in results and results['ResponseMetadata']['HTTPStatusCode'] != 200):
-        module.fail_json('Create delivery stream failed')
+    if not response or ('ResponseMetadata' in response and response['ResponseMetadata']['HTTPStatusCode'] != 200):
+        module.fail_json(msg='Create delivery stream failed', response=response)
 
     if wait:
         await_delivery_stream_state(module, conn, 'ACTIVE')
@@ -328,10 +349,6 @@ def create_delivery_stream(module, conn):
 
 
 def delete_delivery_stream(module, conn):
-    required_params = ['delivery_stream_name']
-    valid_params = ['wait', 'wait_timeout']
-    validate_parameters(required_params, valid_params, module)
-
     wait = module.params.get('wait')
 
     delivery_stream = _describe_delivery_stream(module, conn)
@@ -346,7 +363,10 @@ def delete_delivery_stream(module, conn):
         DeliveryStreamName=module.params.get('delivery_stream_name')
     )
 
-    results = conn.delete_delivery_stream(**params)
+    try:
+        results = conn.delete_delivery_stream(**params)
+    except botocore.exceptions.ClientError as e:
+        module.fail_json(msg=str(e))
 
     if wait:
         await_delivery_stream_state(module, conn, 'DELETED')
@@ -355,14 +375,10 @@ def delete_delivery_stream(module, conn):
 
 
 def facts_delivery_stream(module, conn):
-    required_params = ['delivery_stream_name']
-    valid_params = []
-    validate_parameters(required_params, valid_params, module)
-
     delivery_stream = _describe_delivery_stream(module, conn)
-    delivery_stream_name = module.params.get('delivery_stream_name')
 
     if not delivery_stream:
+        delivery_stream_name = module.params.get('delivery_stream_name')
         module.fail_json(msg="Delivery Stream %s does not exist" % delivery_stream_name)
 
     module.exit_json(changed=False, ansible_facts=dict(delivery_stream=delivery_stream))
@@ -376,8 +392,9 @@ def modify_delivery_stream(module, conn):
 
 def main():
     # Not an ec2_argument_spec, because we're using boto3 and don't need it
-    argument_spec = dict(
-        command=dict(choices=['create', 'delete', 'facts', 'modify'], required=True),
+    argument_spec = ec2_argument_spec()
+    argument_spec.update(dict(
+        command=dict(required=True, choices=['create', 'absent', 'facts', 'modify'], aliases=['state']),
         delivery_stream_name=dict(required=True),
         configuration_type=dict(choices=['s3', 'redshift'], required=False),
         redshift_role_arn=dict(required=False),
@@ -390,32 +407,33 @@ def main():
         s3_role_arn=dict(required=False),
         s3_bucket_arn=dict(required=False),
         s3_prefix=dict(required=False),
-        s3_compression_format=dict(choices=['UNCOMPRESSED', 'GZIP', 'ZIP', 'Snappy'], required=False, default='UNCOMPRESSED'),
+        s3_compression_format=dict(choices=['UNCOMPRESSED', 'GZIP', 'ZIP', 'Snappy'], required=False,
+                                   default='UNCOMPRESSED'),
         s3_buffering_hints_size_in_mb=dict(required=False, type='int'),
         s3_buffering_interval_in_seconds=dict(required=False, type='int'),
         s3_encryption_no_encryption_config=dict(required=False),
-        s3_encryption_awskmskeyarn=dict(required=False),
+        s3_encryption_aws_kmskey_arn=dict(required=False),
         region=dict(required=False),
-        firehose_log_enabled=dict(required=False, type='bool', default=False),
+        cloudwatch_enabled=dict(required=False, type='bool', default=False),
         wait=dict(required=False, type='bool', default=False),
         wait_timeout=dict(required=False, type='int', default=300)
-    )
+    ))
 
     module = AnsibleModule(
         argument_spec=argument_spec,
         required_if=([
-            ('command', 'create', ['configuration_type']),
+            ('command', 'create', ['configuration_type', 's3_role_arn', 's3_bucket_arn']),
         ]),
         required_together=([
-            ('s3_role_arn', 's3_bucket_arn', 's3_prefix'),
-            ('redshift_role_arn', 'redshift_cluster_jdbcurl', 'redshift_username', 'redshift_password')
+            ('redshift_role_arn', 'redshift_cluster_jdbcurl', 'redshift_username', 'redshift_password',
+             'redshift_copy_data_table_name')
         ]),
         supports_check_mode=True
     )
 
     invocations = {
         'create': create_delivery_stream,
-        'delete': delete_delivery_stream,
+        'absent': delete_delivery_stream,
         'facts' : facts_delivery_stream,
         #        'modify': modify_delivery_stream,
     }
@@ -434,10 +452,10 @@ def main():
                                    resource='firehose', region=region,
                                    endpoint=ec2_url, **aws_connect_kwargs)
     except botocore.exceptions.ClientError as e:
-        err_msg = str(e)
-        module.fail_json(msg=err_msg)
+        module.fail_json(msg=str(e))
 
     invocations[module.params.get('command')](module, firehose_conn)
 
 
-main()
+if __name__ == '__main__':
+    main()
