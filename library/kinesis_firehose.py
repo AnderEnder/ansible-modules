@@ -20,11 +20,11 @@ short_description: create, delete, or modify an Amazon firehose instance
 description:
      - Creates, deletes, or modifies firehose instances. This module has a dependency on python-boto3.
 options:
-  command:
+  state:
     description:
       - The operation to perform on a kinesis firehose instance.
     required: true
-    choices: [ 'create', 'delete', 'facts', 'modify' ]
+    choices: [ 'present', 'absent', 'facts' ]
   delivery_stream_name:
     description:
       - The name of the firehose delivery stream on which to operate.
@@ -121,6 +121,7 @@ author:
     - "Return Path (@ReturnPath)"
     - "Andrii Radyk (@AnderEnder)"
 '''
+# TODO: extend module to use ElasticSearch as configuration_type
 
 import time
 from ansible.module_utils.basic import AnsibleModule
@@ -138,32 +139,31 @@ REDSHIFT_UNSUPPORTED_COMPRESSION = ['SNAPPY', 'ZIP']
 
 
 def validate_parameters(required_params, valid_params, module):
-    command = module.params.get('command')
+    state = module.params.get('state')
     for v in required_params:
         if not module.params.get(v):
-            module.fail_json(msg="Parameter %s required for %s command" % (v, command))
+            module.fail_json(msg="Parameter %s required for %s state" % (v, state))
 
 
-def _has_delivery_stream_state(module, conn, state):
-    delivery_stream = _describe_delivery_stream(module, conn)
+def is_delivery_stream_present(module, conn):
+    delivery_stream = describe_delivery_stream(module, conn)
 
-    if ('ResponseMetadata' in delivery_stream.keys() and delivery_stream['ResponseMetadata']['HTTPStatusCode'] != 200):
-        return False
-
-    if not delivery_stream:
-        if state == 'DELETED':
-            return True
+    if delivery_stream:
+        if delivery_stream['DeliveryStreamStatus']:
+            status = True
         else:
-            return False
-    if not 'DeliveryStreamStatus' in delivery_stream:
-        return False
-    return delivery_stream['DeliveryStreamStatus'] == state
+            status = False
+    else:
+        status = False
+
+    return status
 
 
-def _describe_delivery_stream(module, conn):
+def describe_delivery_stream(module, conn):
     params = dict(
         DeliveryStreamName=module.params.get('delivery_stream_name')
     )
+
     try:
         delivery_stream = conn.describe_delivery_stream(**params)
     except botocore.exceptions.ClientError as e:
@@ -172,26 +172,34 @@ def _describe_delivery_stream(module, conn):
         else:
             module.fail_json(msg=str(e))
 
-    delivery_stream = delivery_stream['DeliveryStreamDescription']
+    delivery_stream_description = delivery_stream['DeliveryStreamDescription']
     if 'CreateTimestamp' in delivery_stream:
-        dt = str(delivery_stream['CreateTimestamp'])
-        delivery_stream['CreateTimestamp'] = dt
-    return delivery_stream
+        dt = str(delivery_stream_description['CreateTimestamp'])
+        delivery_stream_description['CreateTimestamp'] = dt
+    return delivery_stream_description
 
 
-def await_delivery_stream_state(module, conn, state):
-    wait_timeout = module.params.get('wait_timeout') + time.time()
+def await_delivery_stream_state(module, conn, present=True):
     delivery_stream_name = module.params.get('delivery_stream_name')
-    status = _has_delivery_stream_state(module, conn, state)
-    while wait_timeout > time.time() and not status:
-        time.sleep(WAIT_SLEEP_TIMEOUT)
+    status = None
+    wait_timeout = module.params.get('wait_timeout') + time.time()
+
+    while not status:
         if wait_timeout <= time.time():
             module.fail_json(msg="Timeout waiting for Delivery Stream %s" % delivery_stream_name)
-        status = _has_delivery_stream_state(module, conn, state)
+
+        if present:
+            status = not is_delivery_stream_present(module, conn)
+        else:
+            status = is_delivery_stream_present(module, conn)
+
+        if not status:
+            time.sleep(WAIT_SLEEP_TIMEOUT)
+
     return status
 
 
-def _delivery_stream_s3_params(module):
+def delivery_stream_s3_params(module):
     required_params = [
         'delivery_stream_name',
         's3_role_arn',
@@ -222,14 +230,13 @@ def _delivery_stream_s3_params(module):
 
     s3config = dict(
         RoleARN=s3_role_arn,
-        BucketARN=s3_bucket_arn
+        BucketARN=s3_bucket_arn,
+        CompressionFormat=s3_compression_format
     )
 
     # Optional S3 parameters
     if s3_prefix:
         s3config['Prefix'] = s3_prefix
-    if s3_compression_format:
-        s3config['CompressionFormat'] = s3_compression_format
 
     if s3_buffering_hints_size_in_mb or s3_buffering_interval_in_seconds:
         s3config['BufferingHints'] = dict()
@@ -253,8 +260,8 @@ def _delivery_stream_s3_params(module):
     return s3config
 
 
-def _delivery_stream_redshift_params(module):
-    s3config = _delivery_stream_s3_params(module)
+def delivery_stream_redshift_params(module):
+    s3config = delivery_stream_s3_params(module)
 
     required_params = [
         'redshift_role_arn',
@@ -305,18 +312,24 @@ def _delivery_stream_redshift_params(module):
     )
     return redshift_config
 
+def present_delivery_stream(module, conn):
+
+    delivery_stream = describe_delivery_stream(module, conn)
+
+    if delivery_stream:
+        changed = False
+    else:
+        if module.check_mode:
+            module.exit_json(changed=True)
+
+        changed = True
+        delivery_stream = create_delivery_stream(module, conn)
+
+    module.exit_json(changed=changed, ansible_facts=dict(delivery_stream=delivery_stream))
 
 def create_delivery_stream(module, conn):
     config_type = module.params.get('configuration_type')
     wait = module.params.get('wait')
-
-    delivery_stream = _describe_delivery_stream(module, conn)
-
-    if delivery_stream:
-        module.exit_json(changed=False)
-
-    if module.check_mode:
-        module.exit_json(changed=True)
 
     params = dict(
         DeliveryStreamName=module.params.get('delivery_stream_name'),
@@ -324,11 +337,11 @@ def create_delivery_stream(module, conn):
 
     # S3 parameters are required for both S3 and Redshift, but are in different locations
     if config_type == 'redshift':
-        redshift_config = _delivery_stream_redshift_params(module)
+        redshift_config = delivery_stream_redshift_params(module)
         params['RedshiftDestinationConfiguration'] = redshift_config
 
     if config_type == 's3':
-        s3config = _delivery_stream_s3_params(module)
+        s3config = delivery_stream_s3_params(module)
         params['ExtendedS3DestinationConfiguration'] = s3config
 
     try:
@@ -340,18 +353,14 @@ def create_delivery_stream(module, conn):
         module.fail_json(msg='Create delivery stream failed', response=response)
 
     if wait:
-        await_delivery_stream_state(module, conn, 'ACTIVE')
+        await_delivery_stream_state(module, conn, present=True)
 
     # Retrieve delivery stream data to return as facts
-    delivery_stream = _describe_delivery_stream(module, conn)
-
-    module.exit_json(changed=True, ansible_facts=dict(delivery_stream=delivery_stream))
-
+    delivery_stream = describe_delivery_stream(module, conn)
+    return delivery_stream
 
 def delete_delivery_stream(module, conn):
-    wait = module.params.get('wait')
-
-    delivery_stream = _describe_delivery_stream(module, conn)
+    delivery_stream = describe_delivery_stream(module, conn)
 
     if not delivery_stream:
         module.exit_json(changed=False)
@@ -368,14 +377,15 @@ def delete_delivery_stream(module, conn):
     except botocore.exceptions.ClientError as e:
         module.fail_json(msg=str(e))
 
+    wait = module.params.get('wait')
     if wait:
-        await_delivery_stream_state(module, conn, 'DELETED')
+        await_delivery_stream_state(module, conn, present=True)
 
     module.exit_json(changed=True)
 
 
 def facts_delivery_stream(module, conn):
-    delivery_stream = _describe_delivery_stream(module, conn)
+    delivery_stream = describe_delivery_stream(module, conn)
 
     if not delivery_stream:
         delivery_stream_name = module.params.get('delivery_stream_name')
@@ -394,7 +404,7 @@ def main():
     # Not an ec2_argument_spec, because we're using boto3 and don't need it
     argument_spec = ec2_argument_spec()
     argument_spec.update(dict(
-        command=dict(required=True, choices=['create', 'absent', 'facts', 'modify'], aliases=['state']),
+        state=dict(required=True, choices=['present', 'absent', 'facts'], default='present'),
         delivery_stream_name=dict(required=True),
         configuration_type=dict(choices=['s3', 'redshift'], required=False),
         redshift_role_arn=dict(required=False),
@@ -422,7 +432,7 @@ def main():
     module = AnsibleModule(
         argument_spec=argument_spec,
         required_if=([
-            ('command', 'create', ['configuration_type', 's3_role_arn', 's3_bucket_arn']),
+            ('state', 'present', ['configuration_type', 's3_role_arn', 's3_bucket_arn']),
         ]),
         required_together=([
             ('redshift_role_arn', 'redshift_cluster_jdbcurl', 'redshift_username', 'redshift_password',
@@ -432,10 +442,9 @@ def main():
     )
 
     invocations = {
-        'create': create_delivery_stream,
+        'present': present_delivery_stream,
         'absent': delete_delivery_stream,
         'facts' : facts_delivery_stream,
-        #        'modify': modify_delivery_stream,
     }
 
     if not HAS_BOTO3:
@@ -454,7 +463,7 @@ def main():
     except botocore.exceptions.ClientError as e:
         module.fail_json(msg=str(e))
 
-    invocations[module.params.get('command')](module, firehose_conn)
+    invocations[module.params.get('state')](module, firehose_conn)
 
 
 if __name__ == '__main__':
