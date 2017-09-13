@@ -1,4 +1,4 @@
- #!/usr/bin/python
+#!/usr/bin/python
 # (c) 2017, Andrii Radyk (@AnderEnder) <ander.ender@gmail.com>
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
@@ -240,9 +240,9 @@ def main():
         source_bucket=dict(required=True, aliases=['bucket'], type='str'),
         source_prefix=dict(required=False, aliases=['prefix'], type='str'),
         source_suffix=dict(required=False, aliases=['suffix'], type='str'),
-        source_events=dict(aliases=['events'], type='list'),
+        source_events=dict(required=False, aliases=['events'], type='list'),
         target_type=dict(required=True, type='str', choices=['lambda', 'sns', 'sqs']),
-        target_arn=dict(type='str'),
+        target_arn=dict(required=False, type='str'),
         state=dict(required=False, default='present', choices=['present', 'absent'])
     ))
 

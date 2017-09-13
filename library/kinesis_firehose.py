@@ -1,18 +1,15 @@
 #!/usr/bin/python
-# This file is part of Ansible
-#
-# Ansible is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# Ansible is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
+# (c) 2016, Return Path (@ReturnPath)
+# (c) 2017, Andrii Radyk (@AnderEnder) <ander.ender@gmail.com>
+# GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
+
+from __future__ import absolute_import, division, print_function
+
+__metaclass__ = type
+
+ANSIBLE_METADATA = {'metadata_version': '1.1',
+                    'status'          : ['preview'],
+                    'supported_by'    : 'community'}
 
 DOCUMENTATION = '''
 ---
@@ -168,7 +165,8 @@ def _describe_delivery_stream(module, conn):
         if 'ResourceNotFoundException' in str(e):
             return None
         else:
-            raise
+            module.fail_json(msg=str(e))
+
     delivery_stream = delivery_stream['DeliveryStreamDescription']
     if 'CreateTimestamp' in delivery_stream:
         dt = str(delivery_stream['CreateTimestamp'])
@@ -392,7 +390,7 @@ def main():
         s3_role_arn=dict(required=False),
         s3_bucket_arn=dict(required=False),
         s3_prefix=dict(required=False),
-        s3_compression_format=dict(choices=['UNCOMPRESSED', 'GZIP', 'ZIP', 'Snappy'], required=False),
+        s3_compression_format=dict(choices=['UNCOMPRESSED', 'GZIP', 'ZIP', 'Snappy'], required=False, default='UNCOMPRESSED'),
         s3_buffering_hints_size_in_mb=dict(required=False, type='int'),
         s3_buffering_interval_in_seconds=dict(required=False, type='int'),
         s3_encryption_no_encryption_config=dict(required=False),
@@ -405,13 +403,15 @@ def main():
 
     module = AnsibleModule(
         argument_spec=argument_spec,
+        required_if=([
+            ('command', 'create', ['configuration_type']),
+        ]),
+        required_together=([
+            ('s3_role_arn', 's3_bucket_arn', 's3_prefix'),
+            ('redshift_role_arn', 'redshift_cluster_jdbcurl', 'redshift_username', 'redshift_password')
+        ]),
         supports_check_mode=True
     )
-
-    if not HAS_BOTO3:
-        module.fail_json(msg='boto3 required for this module')
-    if not HAS_BOTO_EXCEPTIONS:
-        module.fail_json(msg='botocore.exceptions required for this module')
 
     invocations = {
         'create': create_delivery_stream,
