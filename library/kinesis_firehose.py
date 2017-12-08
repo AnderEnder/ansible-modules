@@ -9,8 +9,8 @@ from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
 ANSIBLE_METADATA = {'metadata_version': '1.1',
-                    'status'          : ['preview'],
-                    'supported_by'    : 'community'}
+                    'status': ['preview'],
+                    'supported_by': 'community'}
 
 DOCUMENTATION = '''
 ---
@@ -115,11 +115,11 @@ options:
     required: false
     default: 300
 requirements:
-    - "python >= 2.7"
-    - "boto3"
+  - "python >= 2.7"
+  - "boto3"
 author:
-    - "Return Path (@ReturnPath)"
-    - "Andrii Radyk (@AnderEnder)"
+  - "Return Path (@ReturnPath)"
+  - "Andrii Radyk (@AnderEnder)"
 '''
 # TODO: extend module to use ElasticSearch as configuration_type
 
@@ -312,8 +312,8 @@ def delivery_stream_redshift_params(module):
     )
     return redshift_config
 
-def present_delivery_stream(module, conn):
 
+def present_delivery_stream(module, conn):
     delivery_stream = describe_delivery_stream(module, conn)
 
     if delivery_stream:
@@ -326,6 +326,7 @@ def present_delivery_stream(module, conn):
         delivery_stream = create_delivery_stream(module, conn)
 
     module.exit_json(changed=changed, ansible_facts=dict(delivery_stream=delivery_stream))
+
 
 def create_delivery_stream(module, conn):
     config_type = module.params.get('configuration_type')
@@ -358,6 +359,7 @@ def create_delivery_stream(module, conn):
     # Retrieve delivery stream data to return as facts
     delivery_stream = describe_delivery_stream(module, conn)
     return delivery_stream
+
 
 def delete_delivery_stream(module, conn):
     delivery_stream = describe_delivery_stream(module, conn)
@@ -429,7 +431,7 @@ def main():
         wait_timeout=dict(required=False, type='int', default=300)
     ))
 
-    module = AnsibleModule(
+    ansible_module = AnsibleModule(
         argument_spec=argument_spec,
         required_if=([
             ('state', 'present', ['configuration_type', 's3_role_arn', 's3_bucket_arn']),
@@ -444,26 +446,27 @@ def main():
     invocations = {
         'present': present_delivery_stream,
         'absent': delete_delivery_stream,
-        'facts' : facts_delivery_stream,
+        'facts': facts_delivery_stream,
     }
 
     if not HAS_BOTO3:
-        module.fail_json(msg='boto3 required for this module')
+        ansible_module.fail_json(msg='boto3 required for this ansible_module')
 
-    region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
+    region, ec2_url, aws_connect_kwargs = get_aws_connection_info(ansible_module, boto3=True)
 
     if not region:
-        module.fail_json(
-            msg="Either region or AWS_REGION or EC2_REGION environment variable or boto config aws_region or ec2_region must be set.")
+        error_msg = "Either region or AWS_REGION or EC2_REGION environment variable" \
+                  "or boto config aws_region or ec2_region must be set."
+        ansible_module.fail_json(msg=error_msg)
 
     try:
-        firehose_conn = boto3_conn(module, conn_type='client',
+        firehose_conn = boto3_conn(ansible_module, conn_type='client',
                                    resource='firehose', region=region,
                                    endpoint=ec2_url, **aws_connect_kwargs)
     except botocore.exceptions.ClientError as e:
-        module.fail_json(msg=str(e))
+        ansible_module.fail_json(msg=str(e))
 
-    invocations[module.params.get('state')](module, firehose_conn)
+    invocations[ansible_module.params.get('state')](ansible_module, firehose_conn)
 
 
 if __name__ == '__main__':
