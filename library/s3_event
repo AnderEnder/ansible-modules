@@ -7,8 +7,8 @@ from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
 ANSIBLE_METADATA = {'metadata_version': '1.1',
-                    'status'          : ['preview'],
-                    'supported_by'    : 'community'}
+                    'status': ['preview'],
+                    'supported_by': 'community'}
 
 DOCUMENTATION = '''
 ---
@@ -67,8 +67,8 @@ requirements:
 
 author: Andrii Radyk (@AnderEnder)
 extends_documentation_fragment:
-- aws
-- ec2
+  - aws
+  - ec2
 '''
 
 EXAMPLES = '''
@@ -105,14 +105,14 @@ retry_params = {"tries": 10, "delay": 5, "backoff": 1.2}
 
 NOTIFICATION_TYPES = {
     'lambda': 'LambdaFunctionConfigurations',
-    'sns'   : 'TopicConfigurations',
-    'sqs'   : 'QueueConfigurations',
+    'sns': 'TopicConfigurations',
+    'sqs': 'QueueConfigurations',
 }
 
 ARN_TYPES = {
     'lambda': 'LambdaFunctionArn',
-    'sns'   : 'TopicArn',
-    'sqs'   : 'QueueArn',
+    'sns': 'TopicArn',
+    'sqs': 'QueueArn',
 }
 
 EVENTS_LIST = [
@@ -134,8 +134,8 @@ def get_bucket_notifications(bucket_notifications):
     lambda_notifications = bucket_notifications.lambda_function_configurations
 
     updated_bucket_notification = {
-        'TopicConfigurations'         : topic_notifications or [],
-        'QueueConfigurations'         : queue_notifications or [],
+        'TopicConfigurations': topic_notifications or [],
+        'QueueConfigurations': queue_notifications or [],
         'LambdaFunctionConfigurations': lambda_notifications or [],
     }
 
@@ -156,7 +156,7 @@ def create_trigger(params):
     if source_prefix:
         filter_rules.append(
             {
-                u'Name' : 'Prefix',
+                u'Name': 'Prefix',
                 u'Value': source_prefix
             }
         )
@@ -164,13 +164,13 @@ def create_trigger(params):
     if source_suffix:
         filter_rules.append(
             {
-                u'Name' : 'Suffix',
+                u'Name': 'Suffix',
                 u'Value': source_suffix
             }
         )
     if filter_rules:
         trigger = {
-            'Id'    : name,
+            'Id': name,
             arn_type: target_arn,
             'Events': source_events,
             'Filter': {
@@ -181,7 +181,7 @@ def create_trigger(params):
         }
     else:
         trigger = {
-            'Id'    : name,
+            'Id': name,
             arn_type: target_arn,
             'Events': source_events
         }
